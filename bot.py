@@ -5,6 +5,8 @@ import re
 import os
 from pathlib import Path
 from datetime import datetime, timedelta
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 import dateparser
 from dotenv import load_dotenv
 
@@ -22,6 +24,22 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from google import genai
+
+# --- МИНИМАЛЬНЫЙ ВЕБ-СЕРВЕР ДЛЯ РЕНДЕРА ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Bot is running!".encode("utf-8"))
+
+    def log_message(self, format, *args):
+        pass  # глушим лишние логи запросов
+
+def run_health_check_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
 
 # --- ЗАГРУЗКА .ENV ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -73,7 +91,6 @@ def get_time_selection_kb():
         ]
     )
 
-# --- ЧЕЛОВЕЧЕСКИЙ ФОРМАТ ДАТЫ ---
 def format_friendly_time(dt: datetime) -> str:
     now = datetime.now()
     today = now.date()
@@ -161,7 +178,7 @@ def get_user_tasks(user_id: int):
     conn.close()
     return rows
 
-# --- ОТПРАВКА НАПОМИНАНИЯ ---
+# --- НАПОМИНАНИЯ ---
 async def send_reminder_job(task_id: int, chat_id: int, user_id: int, task: str, reason: str):
     delete_task_from_db(task_id)
     goal = get_user_goal(user_id)
@@ -175,7 +192,6 @@ async def send_reminder_job(task_id: int, chat_id: int, user_id: int, task: str,
     text += f"\n🎯 Твой ориентир: _{goal}_\nСделай это прямо сейчас и будь свободен!"
     await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
-# Восстановление задач при перезапуске бота
 def restore_scheduled_jobs():
     conn = sqlite3.connect("reminders.db")
     cursor = conn.cursor()
@@ -198,12 +214,11 @@ def restore_scheduled_jobs():
     conn.commit()
     conn.close()
 
-# --- ГИБРИДНЫЙ ПАРСЕР СООБЩЕНИЙ ---
+# --- ПАРСЕР ---
 async def parse_with_ai(user_message: str):
     text_lower = user_message.lower().strip()
     now = datetime.now()
 
-    # 1. Нормализация слов
     norm_text = text_lower
     norm_text = re.sub(r"\bчерез\s+секунду\b", "через 1 секунду", norm_text)
     norm_text = re.sub(r"\bчерез\s+минуту\b", "через 1 минуту", norm_text)
@@ -212,7 +227,6 @@ async def parse_with_ai(user_message: str):
     norm_text = re.sub(r"\bминуток\b", "минут", norm_text)
     norm_text = re.sub(r"\bсекундок\b", "секунд", norm_text)
 
-    # 2. Секунды (локально, 0.001 сек)
     sec_match = re.search(r"(?:через\s+(\d+)\s*сек\w*|через\s+сек\w*\s+(\d+)|\bсек\w*\s+через\s+(\d+))", norm_text)
     if sec_match:
         secs = int(sec_match.group(1) or sec_match.group(2) or sec_match.group(3))
@@ -226,7 +240,6 @@ async def parse_with_ai(user_message: str):
             "reason": None
         }
 
-    # 3. Минуты / часы (локально через dateparser)
     time_regex = r"(через\s+[\w\d\s]+?(?:мин\w*|час\w*|дн\w*|день)|завтра\s+в\s+\d{1,2}:\d{2}|в\s+\d{1,2}:\d{2})"
     match = re.search(time_regex, norm_text)
     if match:
@@ -248,7 +261,6 @@ async def parse_with_ai(user_message: str):
                 "reason": None
             }
 
-    # 4. Сложные формулировки через Gemini
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     prompt = f"""
 Ты — модуль извлечения задач и времени.
@@ -284,7 +296,6 @@ async def parse_with_ai(user_message: str):
         print(f"Ошибка Gemini API: {e}")
         return None
 
-# --- ПОДТВЕРЖДЕНИЕ ЗАДАЧИ ---
 async def send_confirmation_prompt(message: Message, user_id: int, task: str, run_date: datetime, reason: str = None):
     friendly_str = format_friendly_time(run_date)
     
@@ -312,7 +323,6 @@ async def send_confirmation_prompt(message: Message, user_id: int, task: str, ru
     
     await message.answer(reply_text, reply_markup=confirm_kb, parse_mode="Markdown")
 
-# --- ХЭНДЛЕРЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -326,7 +336,6 @@ async def cmd_start(message: Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# 1. Смена фокуса / ориентира
 @dp.message(F.text == "🎯 Мой главный фокус")
 @dp.message(F.text.lower().contains("фокус") | F.text.lower().contains("ориентир") | F.text.lower().contains("цель"))
 async def handle_goal_menu(message: Message, state: FSMContext):
@@ -344,7 +353,6 @@ async def save_new_goal(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Фокус сохранен!", reply_markup=main_menu_kb)
 
-# 2. Просмотр списка задач
 @dp.message(Command("tasks"))
 @dp.message(Command("my"))
 @dp.message(F.text == "📋 Мои напоминания")
@@ -374,14 +382,12 @@ async def handle_delete_task(callback: CallbackQuery):
     await callback.message.edit_text("❌ Напоминание удалено.")
     await callback.answer()
 
-# 3. Основной роутер сообщений
 @dp.message(F.text)
 async def handle_ai_message(message: Message, state: FSMContext):
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     user_id = message.from_user.id
     current_state = await state.get_state()
     
-    # Если висит задача и прислали только время
     if user_id in pending_confirmations or current_state == ReminderFlow.waiting_for_custom_time:
         prev_task = pending_confirmations.get(user_id, {}).get("task")
         if not prev_task:
@@ -422,7 +428,6 @@ async def handle_ai_message(message: Message, state: FSMContext):
             parse_mode="Markdown"
         )
 
-# Быстрые кнопки времени
 @dp.callback_query(F.data.startswith("ai_time_"))
 async def handle_quick_time_buttons(callback: CallbackQuery, state: FSMContext):
     time_key = callback.data.replace("ai_time_", "")
@@ -450,7 +455,6 @@ async def handle_quick_time_buttons(callback: CallbackQuery, state: FSMContext):
     await send_confirmation_prompt(callback.message, callback.from_user.id, task, run_date)
     await callback.answer()
 
-# Подтверждение
 @dp.callback_query(F.data.in_(["ai_conf_yes", "ai_conf_no"]))
 async def handle_ai_confirmation(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -480,8 +484,10 @@ async def handle_ai_confirmation(callback: CallbackQuery):
     del pending_confirmations[user_id]
     await callback.answer()
 
-# --- СТАРТ ---
 async def main():
+    # Запускаем легкий веб-сервер в отдельном потоке для Render Health Check
+    threading.Thread(target=run_health_check_server, daemon=True).start()
+    
     init_db()
     restore_scheduled_jobs()
     scheduler.start()
