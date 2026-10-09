@@ -293,11 +293,11 @@ async def parse_with_ai(user_message: str, tz_name: str):
         clean_task = re.sub(r"(?:через\s+\d+\s*сек\w*|через\s+сек\w*\s+\d+|\bсек\w*\s+через\s+\d+|через\s+секунду)", "", user_message, flags=re.IGNORECASE)
         clean_task = re.sub(r"^(напомни|надо|хочу|короче|плиз|пожалуйста|пж|бы|мне)\b\s*", "", clean_task.strip(), flags=re.IGNORECASE)
         clean_task = re.sub(r"\s*\b(напомни|плиз|пожалуйста|пж)\b$", "", clean_task.strip(), flags=re.IGNORECASE).strip(" ,.-!?")
-      return {
-                "task": task_clean.capitalize() if task_clean else None,
-                "target_datetime": parsed_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "reason": None
-            }
+        return {
+            "task": clean_task.capitalize() if clean_task else None,
+            "target_datetime": target_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "reason": None
+        }
 
     # Регулярные выражения времени
     time_regex = r"(через\s+[\w\d\s]+?(?:мин\w*|час\w*|дн\w*|день)|завтра\s+в\s+\d{1,2}:\d{2}|в\s+\d{1,2}:\d{2})"
@@ -321,7 +321,7 @@ async def parse_with_ai(user_message: str, tz_name: str):
             task_clean = re.sub(r"\s*\b(напомни|плиз|пожалуйста|пж)\b$", "", task_clean.strip(), flags=re.IGNORECASE).strip(" ,.-!?")
 
             return {
-                "task": task_clean.capitalize() if clean_task else None,
+                "task": task_clean.capitalize() if task_clean else None,
                 "target_datetime": parsed_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "reason": None
             }
